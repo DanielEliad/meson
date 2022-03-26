@@ -12,6 +12,9 @@
 # limitations under the License.
 
 from __future__ import annotations
+
+import toml
+
 from .. import mparser
 from .. import environment
 from .. import coredata
@@ -24,7 +27,7 @@ from .. import envconfig
 from ..wrap import wrap, WrapMode
 from .. import mesonlib
 from ..mesonlib import (MesonBugException, HoldableObject, FileMode, MachineChoice, OptionKey,
-                        listify, extract_as_list, has_path_sep, PerMachine)
+                        listify, extract_as_list, has_path_sep, PerMachine, verbose_git)
 from ..programs import ExternalProgram, NonExistingExternalProgram
 from ..dependencies import Dependency
 from ..depfile import DepFile
@@ -229,7 +232,6 @@ TEST_KWARGS: T.List[KwargInfo] = [
 ]
 
 permitted_dependency_kwargs = {
-    'allow_fallback',
     'cmake_args',
     'cmake_module_path',
     'cmake_package_version',
@@ -568,7 +570,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                 name = l + '_stdlib'
                 df = DependencyFallbacksHolder(self, [name])
                 df.set_fallback(di)
-                dep = df.lookup(kwargs, force_fallback=True)
+                dep = df.lookup(kwargs)
                 self.build.stdlibs[for_machine][l] = dep
 
     def _import_module(self, modname: str, required: bool) -> NewExtensionModule:
@@ -861,16 +863,9 @@ external dependencies (including libraries) must go to "dependencies".''')
                     raise InterpreterException(f'Subproject {subp_name} version is {pv} but {wanted} required.')
             return subproject
 
-        r = self.environment.wrap_resolver
-        try:
-            subdir = r.resolve(subp_name, method)
-        except wrap.WrapException as e:
-            if not required:
-                mlog.log(e)
-                mlog.log('Subproject ', mlog.bold(subp_name), 'is buildable:', mlog.red('NO'), '(disabling)')
-                return self.disabled_subproject(subp_name, exception=e)
-            raise e
 
+        # TODO: resolve using self.environment.external_dependencies
+        subdir = self._ensure_subproject(subp_name)
         subdir_abs = os.path.join(self.environment.get_source_dir(), subdir)
         os.makedirs(os.path.join(self.build.environment.get_build_dir(), subdir), exist_ok=True)
         self.global_args_frozen = True
@@ -900,6 +895,124 @@ external dependencies (including libraries) must go to "dependencies".''')
                 mlog.log('\nSubproject', mlog.bold(subdir), 'is buildable:', mlog.red('NO'), '(disabling)')
                 return self.disabled_subproject(subp_name, exception=e)
             raise e
+
+    def _ensure_subproject(self, subp_name):
+        subprojects = os.path.join(self.environment.get_source_dir(), self.subproject_dir)
+        dirname = os.path.join(subprojects, subp_name)
+
+        if not os.path.exists(subprojects):
+            os.mkdir(subprojects)
+        elif not os.path.isdir(subprojects):
+            raise InterpreterException(f'Subproject dir exists but is not a directory {subprojects}')
+
+        # TODO: the subproject could exist but it might be from a bad
+        #  setup where the version was weird I think we should move to entirely static version basis like crates
+        #  however then we can't just use git as is
+        #  even maintaining a package cache is not good enough because we can't tell if the same dependency
+        #  was needed in different versions under different sub dependencies
+        #  I.E. if in one setup we need A->B->C(v=1) and in another A->D->C(2)
+        #  We will have a global subprojects dir that at first contains:
+        #  A/ B/ C(v=1)/
+        #  And then still contains:
+        #  A/ B/ C(v=1)/
+        #  because how can we know that C(v=1) is not exactly what we need?
+        #  Maybe the solution is just a lock file that we need to maintain
+        #  But then we need to maintain it per setup
+        #  Lock files are un-necessary when we use EXACT versions of everything
+        #  But then conflicts between packages are going to happen really frequently
+        #  So we do need a lock file but we have so many dynamic paths
+        #  that we can't know before we configure(setup) the project which packages we are going to need
+        #  Another problem is that its super awkward to support a branch name we need to like check for updates each setup I guess?
+
+        # TODO: possible solution
+        #  we know all the possible dependencies that we can get because the deps.toml is constant and is the maximum branches we can go on
+        #  so we can build the dependency graph going forward
+        #  still three problems:
+        #  1. version duplication once in meson.build and another in the deps.toml (for checking semver)
+        #  2. we should use version checking meson or in the deps.toml but not both its weird
+        #  3.
+        #  we can generate a lock file only on request and generate as many as we need just for the current flow
+        #  because our lock file is determined only at runtime because we dont know which features will be enabled
+        #  we can generate it only at runtime in one run or if it exists check every time that we are not violating it
+        #  this means the lock file must be saved in the source dir and not the build dir
+
+        if os.path.exists(dirname):
+            if not os.path.isdir(dirname):
+                raise InterpreterException(f'Subproject exists in subproject dir but is not a directory {dirname}')
+        else:
+            # TODO: get it!
+            dep = self.environment.dependencies.get(subp_name)
+            self._populate_subproject(dep, dirname)
+
+        return dirname
+        # rel_path = se
+        # r = self.environment.wrap_resolver
+        # try:
+        #     subdir = r.resolve(subp_name, method)
+        # except wrap.WrapException as e:
+        #     if not required:
+        #         mlog.log(e)
+        #         mlog.log('Subproject ', mlog.bold(subp_name), 'is buildable:', mlog.red('NO'), '(disabling)')
+        #         return self.disabled_subproject(subp_name, exception=e)
+        #     raise e
+
+
+    def _populate_subproject(self, dep, dirname):
+        if 'git' in dep:
+            self._populate_subproject_git(dep, dirname)
+        else:
+            # TODO: support other ways of populating
+            raise InterpreterException("other than git is not supported for now")
+
+    def _is_git_full_commit_id(self, revno: str) -> bool:
+        result = False
+        if len(revno) in (40, 64): # 40 for sha1, 64 for upcoming sha256
+            result = all(ch in '0123456789AaBbCcDdEeFf' for ch in revno)
+        return result
+
+    def _populate_subproject_git(self, dep, dirname):
+        if 'revision' not in dep:
+            raise InterpreterException(f'Could not resolve git subproject {dirname}')
+        revno = dep['revision']
+        checkout_cmd = ['-c', 'advice.detachedHead=false', 'checkout', revno, '--']
+        is_shallow = False
+        depth_option = []    # type: T.List[str]
+        url = dep['git']
+        directory_name = os.path.basename(dirname)
+        subprojects = os.path.dirname(dirname)
+        if dep.get('depth') is not None:
+            is_shallow = True
+            depth_option = ['--depth', dep.get('depth')]
+        # for some reason git only allows commit ids to be shallowly fetched by fetch not with clone
+        if is_shallow and self._is_git_full_commit_id(revno):
+            # git doesn't support directly cloning shallowly for commits,
+            # so we follow https://stackoverflow.com/a/43136160
+            # TODO: this may be broken
+            verbose_git(['-c', 'init.defaultBranch=meson-dummy-branch', 'init', directory_name], subprojects, check=True)
+            verbose_git(['remote', 'add', 'origin', url], dirname, check=True)
+            verbose_git(['fetch', *depth_option, 'origin', revno], dirname, check=True)
+            verbose_git(checkout_cmd, dirname, check=True)
+            if dep.get('clone-recursive', '').lower() == 'true':
+                verbose_git(['submodule', 'update', '--init', '--checkout',
+                             '--recursive', *depth_option], dirname, check=True)
+            push_url = dep.get('push-url')
+            if push_url:
+                verbose_git(['remote', 'set-url', '--push', 'origin', push_url], dirname, check=True)
+        else:
+            if not is_shallow:
+                verbose_git(['clone', url, directory_name], subprojects, check=True)
+                if revno.lower() != 'head':
+                    if not verbose_git(checkout_cmd, dirname):
+                        verbose_git(['fetch', url, revno], dirname, check=True)
+                        verbose_git(checkout_cmd, dirname, check=True)
+            else:
+                verbose_git(['clone', *depth_option, '--branch', revno, url,
+                             directory_name], subprojects, check=True)
+            if dep.get('clone-recursive', '').lower() == 'true':
+                verbose_git(['submodule', 'update', '--init', '--checkout', '--recursive', *depth_option],
+                            dirname, check=True)
+
+
 
     def _do_subproject_meson(self, subp_name: str, subdir: str,
                              default_options: T.Dict[OptionKey, str],
@@ -1178,14 +1291,17 @@ external dependencies (including libraries) must go to "dependencies".''')
         self.build.subproject_dir = self.subproject_dir
 
         # Load wrap files from this (sub)project.
-        wrap_mode = self.coredata.get_option(OptionKey('wrap_mode'))
-        if not self.is_subproject() or wrap_mode != WrapMode.nopromote:
-            subdir = os.path.join(self.subdir, spdirname)
-            r = wrap.Resolver(self.environment.get_source_dir(), subdir, self.subproject, wrap_mode)
-            if self.is_subproject():
-                self.environment.wrap_resolver.merge_wraps(r)
-            else:
-                self.environment.wrap_resolver = r
+        deps_file = os.path.join(self.environment.get_source_dir(), self.subdir, 'deps.toml')
+        if os.path.exists(deps_file):
+            if not os.path.isfile(deps_file):
+                raise InterpreterException(f'deps.toml file {deps_file} exists but is a directory')
+            with open(deps_file, 'r') as f:
+                toml_data = toml.load(f)
+                # TODO: merging and errors :) (this is where we called self.environment.wrap_resolver.merge_wraps(r))
+                #  TODO: handle version mismatches TODO: caching subprojects in ${ROOT}/subprojects is bad because
+                #   different setups might have the same subproject name again
+                # TODO: think about moving into a completely version based format
+                self.environment.dependencies.update(toml_data)
 
         self.build.projects[self.subproject] = proj_name
         mlog.log('Project name:', mlog.bold(proj_name))
@@ -1540,12 +1656,13 @@ external dependencies (including libraries) must go to "dependencies".''')
         if progobj:
             return progobj
 
-        fallback = None
-        wrap_mode = self.coredata.get_option(OptionKey('wrap_mode'))
-        if wrap_mode != WrapMode.nofallback and self.environment.wrap_resolver:
-            fallback = self.environment.wrap_resolver.find_program_provider(args)
-        if fallback and wrap_mode == WrapMode.forcefallback:
-            return self.find_program_fallback(fallback, args, required, extra_info)
+        # TODO: delete wrap and everything related to fallbacks its weird
+        # fallback = None
+        # wrap_mode = self.coredata.get_option(OptionKey('wrap_mode'))
+        # if wrap_mode != WrapMode.nofallback and self.environment.wrap_resolver:
+        #     fallback = self.environment.wrap_resolver.find_program_provider(args)
+        # if fallback and wrap_mode == WrapMode.forcefallback:
+        #     return self.find_program_fallback(fallback, args, required, extra_info)
 
         progobj = self.program_from_file_for(for_machine, args)
         if progobj is None:
@@ -1604,7 +1721,6 @@ external dependencies (including libraries) must go to "dependencies".''')
 
     # When adding kwargs, please check if they make sense in dependencies.get_dep_identifier()
     @FeatureNewKwargs('dependency', '0.57.0', ['cmake_package_version'])
-    @FeatureNewKwargs('dependency', '0.56.0', ['allow_fallback'])
     @FeatureNewKwargs('dependency', '0.54.0', ['components'])
     @FeatureNewKwargs('dependency', '0.52.0', ['include_type'])
     @FeatureNewKwargs('dependency', '0.50.0', ['not_found_message', 'cmake_module_path', 'cmake_args'])
@@ -1619,12 +1735,11 @@ external dependencies (including libraries) must go to "dependencies".''')
         names = [n for n in args[0] if n]
         if len(names) > 1:
             FeatureNew('dependency with more than one name', '0.60.0').use(self.subproject)
-        allow_fallback = kwargs.get('allow_fallback')
-        if allow_fallback is not None and not isinstance(allow_fallback, bool):
-            raise InvalidArguments('"allow_fallback" argument must be boolean')
+        #TODO: do this only if project has options maybe
+        # fallback = kwargs.get('fallback', names)
         fallback = kwargs.get('fallback')
         default_options = kwargs.get('default_options')
-        df = DependencyFallbacksHolder(self, names, allow_fallback, default_options)
+        df = DependencyFallbacksHolder(self, names, default_options)
         df.set_fallback(fallback)
         not_found_message = kwargs.get('not_found_message', '')
         if not isinstance(not_found_message, str):

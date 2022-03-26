@@ -52,6 +52,7 @@ class CommandLineParser:
                          help_msg='Generate release archive',)
         self.add_command('install', minstall.add_arguments, minstall.run,
                          help_msg='Install the project')
+        # TODO: fix introspect
         self.add_command('introspect', mintro.add_arguments, mintro.run,
                          help_msg='Introspect project')
         self.add_command('init', minit.add_arguments, minit.run,

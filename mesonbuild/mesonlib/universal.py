@@ -2027,7 +2027,6 @@ _BUILTIN_NAMES = {
     'warning_level',
     'werror',
     'wrap_mode',
-    'force_fallback_for',
     'pkg_config_path',
     'cmake_prefix_path',
 }

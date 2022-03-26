@@ -922,8 +922,14 @@ class Backend:
         #
         # Add -nostdinc/-nostdinc++ if needed; can't be overridden
         commands += self.get_no_stdlib_args(target, compiler)
-        # Add things like /NOLOGO or -pipe; usually can't be overridden
-        commands += compiler.get_always_args()
+        always_args = True
+        try:
+            always_args = self.get_option_for_target(OptionKey('b_alwaysargs'), target)
+        except KeyError:
+            pass
+        if always_args:
+            # Add things like /NOLOGO or -pipe; usually can't be overridden
+            commands += compiler.get_always_args()
         # Only add warning-flags by default if the buildtype enables it, and if
         # we weren't explicitly asked to not emit warnings (for Vala, f.ex)
         if no_warn_args:

@@ -287,8 +287,9 @@ base_options: 'KeyedOptionDictType' = {
                                                  'off'),
     OptionKey('b_coverage'): coredata.UserBooleanOption('Enable coverage tracking.', False),
     OptionKey('b_colorout'): coredata.UserComboOption('Use colored output',
-                                                      ['auto', 'always', 'never'],
+                                                      ['auto', 'always', 'never', 'none'],
                                                       'always'),
+    OptionKey('b_alwaysargs'): coredata.UserBooleanOption('Use always args', True),
     OptionKey('b_ndebug'): coredata.UserComboOption('Disable asserts', ['true', 'false', 'if-release'], 'false'),
     OptionKey('b_staticpic'): coredata.UserBooleanOption('Build static libraries as position independent', True),
     OptionKey('b_pie'): coredata.UserBooleanOption('Build executables as position independent', False),
@@ -332,7 +333,10 @@ def get_base_compile_args(options: 'KeyedOptionDictType', compiler: 'Compiler') 
     except KeyError:
         pass
     try:
-        args += compiler.get_colorout_args(options[OptionKey('b_colorout')].value)
+
+        colorout = options[OptionKey('b_colorout')].value
+        if colorout != "none":
+            args += compiler.get_colorout_args(colorout)
     except KeyError:
         pass
     try:

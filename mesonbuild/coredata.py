@@ -665,7 +665,7 @@ class CoreData:
 
         if key.name == 'buildtype':
             self._set_others_from_buildtype(value)
-        elif key.name in {'wrap_mode', 'force_fallback_for'}:
+        elif key.name in {'wrap_mode'}:
             # We could have the system dependency cached for a dependency that
             # is now forced to use subproject fallback. We probably could have
             # more fine grained cache invalidation, but better be safe.
@@ -1223,7 +1223,6 @@ BUILTIN_CORE_OPTIONS: 'MutableKeyedOptionDictType' = OrderedDict([
     (OptionKey('warning_level'),   BuiltinOption(UserComboOption, 'Compiler warning level to use', '1', choices=['0', '1', '2', '3'], yielding=False)),
     (OptionKey('werror'),          BuiltinOption(UserBooleanOption, 'Treat warnings as errors', False, yielding=False)),
     (OptionKey('wrap_mode'),       BuiltinOption(UserComboOption, 'Wrap mode', 'default', choices=['default', 'nofallback', 'nodownload', 'forcefallback', 'nopromote'])),
-    (OptionKey('force_fallback_for'), BuiltinOption(UserArrayOption, 'Force fallback for those subprojects', [])),
 
     # Python module
     (OptionKey('install_env', module='python'),

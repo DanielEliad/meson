@@ -16,6 +16,7 @@ import itertools
 import os, platform, re, sys, shutil
 import typing as T
 import collections
+from typing import Dict, Any
 
 from . import coredata
 from . import mesonlib
@@ -440,6 +441,7 @@ def machine_info_can_run(machine_info: MachineInfo):
         ((true_build_cpu_family == 'aarch64') and (machine_info.cpu_family == 'arm'))
 
 class Environment:
+    dependencies: dict[Any, Any]
     private_dir = 'meson-private'
     log_dir = 'meson-logs'
     info_dir = 'meson-info'
@@ -577,6 +579,8 @@ class Environment:
         self.default_cmake = ['cmake']
         self.default_pkgconfig = ['pkg-config']
         self.wrap_resolver: T.Optional['Resolver'] = None
+        # TODO: external dependencies can also export program_names as well so a feature for the future :)
+        self.dependencies = {}
 
     def _load_machine_file_options(self, config: 'ConfigParser', properties: Properties, machine: MachineChoice) -> None:
         """Read the contents of a Machine file and put it in the options store."""
